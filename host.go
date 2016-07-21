@@ -126,7 +126,7 @@ func (h *Host) Connect(term *sshd.Terminal) {
 	if h.isOp(term.Conn) {
 		h.Room.Ops.Add(member)
 	}
-	ratelimit := rateio.NewSimpleLimiter(3, time.Second*3)
+	ratelimit := rateio.NewSimpleLimiter(3, time.Second*1)
 
 	for {
 		line, err := term.ReadLine()

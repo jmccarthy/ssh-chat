@@ -1,9 +1,13 @@
 package chat
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"sync"
 
 	"github.com/shazow/ssh-chat/chat/message"
@@ -27,12 +31,14 @@ type Member struct {
 
 // Room definition, also a Set of User Items
 type Room struct {
-	topic     string
-	history   *message.History
-	broadcast chan message.Message
-	commands  Commands
-	closed    bool
-	closeOnce sync.Once
+	topic        string
+	history      *message.History
+	broadcast    chan message.Message
+	slack        chan message.Message
+	slackWebhook string
+	commands     Commands
+	closed       bool
+	closeOnce    sync.Once
 
 	Members *idSet
 	Ops     *idSet
@@ -41,11 +47,15 @@ type Room struct {
 // NewRoom creates a new room.
 func NewRoom() *Room {
 	broadcast := make(chan message.Message, roomBuffer)
+	slack := make(chan message.Message, roomBuffer)
+	webhook := os.Getenv("SSH_CHAT_WEBHOOK")
 
 	return &Room{
-		broadcast: broadcast,
-		history:   message.NewHistory(historyLen),
-		commands:  *defaultCommands,
+		broadcast:    broadcast,
+		slack:        slack,
+		slackWebhook: webhook,
+		history:      message.NewHistory(historyLen),
+		commands:     *defaultCommands,
 
 		Members: newIdSet(),
 		Ops:     newIdSet(),
@@ -74,6 +84,21 @@ func (r *Room) SetLogging(out io.Writer) {
 	r.history.SetOutput(out)
 }
 
+// SlackMsg reacts to a message, will block until done.
+func (r *Room) SlackMsg(m message.Message) {
+	payload := make(map[string]interface{})
+	payload["text"] = m.String()
+
+	data, _ := json.Marshal(payload)
+	_, err := http.Post(r.slackWebhook, "application/json", bytes.NewReader(data))
+	if err != nil {
+		// logger.Errorf("Failed to post to Slack webhook: %s", err)
+		fmt.Printf("Failed to post to Slack webhook: %s\n", err)
+
+		return
+	}
+}
+
 // HandleMsg reacts to a message, will block until done.
 func (r *Room) HandleMsg(m message.Message) {
 	switch m := m.(type) {
@@ -88,6 +113,10 @@ func (r *Room) HandleMsg(m message.Message) {
 		user := m.To()
 		user.Send(m)
 	default:
+		if r.slackWebhook != "" {
+			r.slack <- m
+		}
+
 		fromMsg, skip := m.(message.MessageFrom)
 		var skipUser *message.User
 		if skip {
@@ -115,6 +144,12 @@ func (r *Room) HandleMsg(m message.Message) {
 // Serve will consume the broadcast room and handle the messages, should be
 // run in a goroutine.
 func (r *Room) Serve() {
+	// Consume rebroadcasts to slack
+	go func() {
+		for m := range r.slack {
+			go r.SlackMsg(m)
+		}
+	}()
 	for m := range r.broadcast {
 		go r.HandleMsg(m)
 	}
